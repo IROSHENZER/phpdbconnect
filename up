@@ -1,0 +1,464 @@
+<?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+require_once 'database.php';
+require_once 'getid3/getid3.php';
+
+session_start();
+if (isset($_SESSION['id']) && isset($_SESSION['user_name'])) {
+    $user_id = $_SESSION['id'];
+  
+
+    // Function to generate a unique slug
+    function generateUniqueSlug($conn, $slug)
+    {
+        $baseSlug = $slug;
+        $counter = 1;
+        $slugExists = true;
+        $maxAttempts = 100; // Set a maximum number of attempts to avoid an infinite loop
+    
+        while ($slugExists && $counter <= $maxAttempts) {
+            $stmt = $conn->prepare("SELECT COUNT(*) FROM posts WHERE slug = ?");
+            $stmt->bind_param("s", $slug);
+            $stmt->execute();
+            $count = $stmt->get_result()->fetch_row()[0];
+    
+            if ($count == 0) {
+                $slugExists = false;
+            } else {
+                $slug = $baseSlug . '-' . $counter;
+                $counter++;
+            }
+        }
+    
+        if ($counter > $maxAttempts) {
+            // If the maximum number of attempts is reached, generate a random slug
+            $slug = uniqid('-', true);
+        }
+    
+        return $slug;
+    }
+
+    // Check if an artist record exists for the logged-in user
+    $stmt = $conn->prepare("SELECT id FROM artists WHERE id = ?");
+    $stmt->bind_param("i", $user_id);
+    $stmt->execute();
+    $artist_result = $stmt->get_result();
+
+    if ($artist_result->num_rows == 0) {
+        // Sanitize user input
+        $artist_name = mysqli_real_escape_string($conn, $_SESSION['user_name']);
+
+        // Generate a unique slug and slug_url
+        $slug = generateUniqueSlug($conn, strtolower(str_replace(' ', '-', $artist_name)));
+        $slug_url = $slug;
+
+        // Insert the new artist record with unique slug, slug_url, and user ID
+        $stmt = $conn->prepare("INSERT INTO artists (id, name, slug, slug_url) VALUES (?, ?, ?, ?)");
+        $stmt->bind_param("isss", $user_id, $artist_name, $slug, $slug_url);
+        $stmt->execute();
+    }
+
+    $artist_id = $user_id;
+
+    ?>
+
+    <?php
+    // Assuming you have a database connection already established
+    $successMessages = '';
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+      
+
+        if (isset($_FILES['audio']) && $_FILES['audio']['error'] == UPLOAD_ERR_OK && isset($_FILES['audio']['tmp_name']) && $_FILES['audio']['tmp_name'] != '') {
+            $file_name = $_FILES['audio']['name'];
+            $file_tmp = $_FILES['audio']['tmp_name'];
+            $file_size = $_FILES['audio']['size'];
+            $file_type = $_FILES['audio']['type'];
+
+            // Check if the file has an MP3 or M4A extension
+            $file_info = pathinfo($file_name);
+            $file_extension = $file_info['extension'];
+            if ($file_extension != 'mp3' && $file_extension != 'm4a') {
+                echo "Only MP3 and M4A files are allowed";
+                exit;
+            }
+
+            // Check if the file size is within the limit (10 MB)
+            $max_file_size = 100 * 1024 * 1024; // 10 MB in bytes
+            if ($file_size > $max_file_size) {
+                echo "File size exceeds the limit of 10 MB";
+                exit;
+            }
+
+            // Generate a unique identifier
+            $unique_identifier = uniqid();
+
+            // Extract file name and extension
+            $file_basename = $file_info['filename'];
+
+            // Append unique identifier to the file name
+            $new_file_name = $file_basename . '_' . $unique_identifier . '.' . $file_extension;
+
+            // Paths
+            $upload_dir = 'C:\\wamp64\\www\\sritune\\public\\Audios\\';            $upload_path = $upload_dir . $new_file_name;
+
+            // Convert M4A to MP3 if necessary
+            if ($file_extension == 'm4a') {
+                // Check if the FFmpeg library is available
+                if (!command_exists('ffmpeg')) {
+                    echo "FFmpeg library is not available";
+                    exit;
+                }
+
+                // Use FFmpeg to convert M4A to MP3
+                exec("ffmpeg -i " . escapeshellarg($file_tmp) . " -codec:a libmp3lame -qscale:a 2 " . escapeshellarg($upload_path));
+
+                // Check if the MP3 file was created successfully
+                if (!file_exists($upload_path)) {
+                    echo "Error converting audio file";
+                    exit;
+                }
+            } else {
+                // Upload MP3 file directly without conversion
+                if (!move_uploaded_file($file_tmp, $upload_path)) {
+                    echo "Error uploading audio file to server";
+                    exit;
+                }
+            }
+
+            // Insert audio file details into the database
+            $result = mysqli_query($conn, "INSERT INTO audio (artist_id, filename) VALUES ('$artist_id', 'Audios/$new_file_name')");
+            if ($result) {
+                $successMessages .= "Audio file uploaded successfully.<br>";
+            } else {
+                error_log(mysqli_error($conn), 0);
+                $successMessages .= "Error uploading audio file";
+            }
+        }
+        
+
+        if (isset($_FILES['image']) && $_FILES['image']['error'] == UPLOAD_ERR_OK && isset($_FILES['image']['tmp_name']) && $_FILES['image']['tmp_name'] != '') {
+            // Get file details
+            $file_name = $_FILES['image']['name'];
+            $file_tmp = $_FILES['image']['tmp_name'];
+            $file_size = $_FILES['image']['size'];
+            $file_type = $_FILES['image']['type'];
+
+            // Check file size and type
+            $allowed_types = array('image/jpeg');
+            $max_file_size = 1 * 1024 * 1024; // 1 MB in bytes
+
+            if ($file_size > $max_file_size) {
+                echo "File size should be less than 1 MB";
+                exit;
+            }
+
+            // Validate the file type using exif_imagetype
+            $image_type = exif_imagetype($file_tmp);
+            if ($image_type !== IMAGETYPE_JPEG) {
+                echo "Only JPEG files are allowed";
+                exit;
+            }
+
+            // Generate a unique file name
+            $timestamp = time(); // Get current timestamp
+            $random_number = mt_rand(1000, 9999); // Generate a random number between 1000 and 9999
+            $unique_file_name = $timestamp . '_' . $random_number . '_' . $file_name;
+
+            // Resize image to 300x300
+            $resized_width = 300;
+            $resized_height = 300;
+
+            // Create a new image resource with the desired dimensions
+            $resized_image = imagecreatetruecolor($resized_width, $resized_height);
+
+            // Load the original image
+            $original_image = imagecreatefromjpeg($file_tmp);
+
+            // Resize the original image to the new dimensions
+            imagecopyresampled($resized_image, $original_image, 0, 0, 0, 0, $resized_width, $resized_height, imagesx($original_image), imagesy($original_image));
+
+            // Save resized image to server
+            $upload_dir = 'C:\\wamp64\\www\\sritune\\public\\images\\';
+            $upload_path = $upload_dir . $unique_file_name;
+            if (imagejpeg($resized_image, $upload_path)) {
+                // Prepare and execute the SQL statement
+                try {
+                    $pdo = new PDO("mysql:host=$host;dbname=$database", $username, $password);
+                    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+                    // Insert image file details into the database
+                    $created_at = date('Y-m-d H:i:s');
+                    $stmt = $pdo->prepare("INSERT INTO image_uploads (filename, created_at, updated_at) VALUES (:filename, :created_at, :updated_at)");
+                    $stmt->execute([
+                        ':filename' => "/images/" . $unique_file_name,
+                        ':created_at' => $created_at,
+                        ':updated_at' => $created_at
+                    ]);
+
+                    // Get the ID of the newly inserted image upload
+                    $image_upload_id = $pdo->lastInsertId();
+
+                    // Sanitize user input
+                    $author_id = 43;
+                    $category_id = 35;
+                    $title_en = htmlspecialchars($_POST['title_en'], ENT_QUOTES, 'UTF-8');
+                    
+                    // Generate a unique slug from the title
+                    $slug = strtolower(trim(preg_replace('/[^A-Za-z0-9-]+/', '-', $title_en)));
+                    $slug = generateUniqueSlug($conn, $slug);
+                    
+                   // $body_en = htmlspecialchars(nl2br($_POST['body_en']), ENT_QUOTES, 'UTF-8'); // Convert newlines to HTML line breaks and escape special characters
+
+                   $body_en = htmlspecialchars($_POST['body_en'], ENT_QUOTES, 'UTF-8');
+                   $body_en = nl2br($body_en); // Convert newlines to HTML line breaks
+
+                   $tag = htmlspecialchars($_POST['tag'], ENT_QUOTES, 'UTF-8');
+                    $featured = 'off';
+
+                    // Insert post details into the database
+                    $stmt = $pdo->prepare("INSERT INTO posts (author_id, category_id, title_en, slug, body_en, created_at, updated_at, ImageUpload_id, tag, featured) VALUES (:author_id, :category_id, :title_en, :slug, :body_en, :created_at, :updated_at, :image_upload_id, :tag, :featured)");
+$stmt->bindParam(':author_id', $author_id);
+$stmt->bindParam(':category_id', $category_id);
+$stmt->bindParam(':title_en', $title_en);
+$stmt->bindParam(':slug', $slug);
+$stmt->bindParam(':body_en', $body_en, PDO::PARAM_STR);
+$stmt->bindParam(':created_at', $created_at);
+$stmt->bindParam(':updated_at', $created_at);
+$stmt->bindParam(':image_upload_id', $image_upload_id);
+$stmt->bindParam(':tag', $tag);
+$stmt->bindParam(':featured', $featured);
+$stmt->execute();
+
+                    $post_id = $pdo->lastInsertId();
+
+                    // Get the audio table ID (assuming 'audio_table' is the table name)
+                    $audio_id = $pdo->lastInsertId();
+
+                    // Update the post with the audio ID as the seo_title value
+                    $stmt = $pdo->prepare("UPDATE posts SET seo_title = :audio_id WHERE id = :post_id");
+                    $stmt->bindParam(':audio_id', $audio_id);
+                    $stmt->bindParam(':post_id', $post_id);
+                    $stmt->execute();
+
+                    $successMessages .= "Image uploaded successfully.<br>";
+                    $successMessages .= "Post created successfully. ";
+                } catch(PDOException $e) {
+                    echo "Error: " . $e->getMessage();
+                }
+                // Close the database connection
+                $pdo = null;
+            } else {
+                $successMessages .= "Error uploading image file";
+            }
+        }
+    }
+
+
+ 
+    ?>
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
+
+        <title>Upload Audio and Image Files</title>
+        <!-- Existing styles and scripts... -->
+    </head>
+    <body>
+    <div class="container mt-5">
+
+    <center>
+    <img src="https://www.sritune.com/images/logo.png" alt="Sritune Logo" class="header-logo">
+
+        <h1 class="header-title">  welcome - <?php echo htmlspecialchars($_SESSION['name'], ENT_QUOTES, 'UTF-8'); ?></h1>
+    </center>
+  
+<br>
+
+     
+    <center>   <h3>Upload Audio and Image Files</h3>
+</center><br>
+        <form method="post" enctype="multipart/form-data">
+        <div class="form-group custom-border">
+  <label for="audio">Audio file (MP3 only):</label>
+  <input type="file" class="form-control-file" id="audio" name="audio" accept=".mp3" required>
+</div>
+<div class="form-group custom-border">
+  <label for="image">Image file (JPG only):</label>
+  <input type="file" class="form-control-file" id="image" name="image" accept=".jpg" required>
+</div>
+
+                <br>
+                <div class="form-group">
+                    <label for="title_en">Song Title (English):</label>
+                    <input type="text" class="form-control" id="title_en" name="title_en" required>
+                </div>
+                <div class="form-group">
+                    <label for="body_en">Body (English): ex - Artist,Lyrics,etc</label>
+                    <textarea class="form-control" id="body_en" name="body_en" required wrap="soft"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="tag">Tags (English):  ex - newsong,djsong, </label>
+                    <textarea class="form-control" id="tag" name="tag" required wrap="soft"></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Submit</button>
+            </form>
+            <a href="logout.php" class="btn btn-primary">Logout</a> <br> <br>
+           
+        </div>
+
+        <!-- Success Modal -->
+        <div class="modal fade" id="successModal" tabindex="-1" role="dialog" aria-labelledby="successModalLabel" aria-hidden="true">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="successModalLabel">Success</h5>
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                            <span aria-hidden="true">&times;</span>
+                        </button>
+                    </div>
+                    <div class="modal-body">
+                        <!-- Success message will be displayed here -->
+                    </div>
+                    <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Spinner -->
+        <div id="loadingSpinner" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.5); z-index: 9999; justify-content: center; align-items: center;">
+            <div class="spinner-border text-light" role="status">
+                <span class="sr-only">Loading...</span>
+            </div>
+        </div>
+
+        <!-- Hidden input field to pass success messages to JavaScript -->
+        <input type="hidden" id="successMessages" value="<?php echo htmlspecialchars($successMessages); ?>">
+
+        <script>
+            function convertToLowercase(input) {
+                if (input.id === 'slug') {
+                    input.value = input.value.toLowerCase();
+                }
+            }
+
+            $(document).ready(function() {
+                $('form').submit(function(event) {
+                    event.preventDefault(); // Prevent the default form submission
+
+                    // Show the loading spinner
+                    $('#loadingSpinner').show();
+
+                    // Serialize the form data
+                    var formData = new FormData(this);
+
+                    // Send the AJAX request
+                    $.ajax({
+                        url: '<?php echo htmlspecialchars($_SERVER["PHP_SELF"]);?>',
+                        type: 'POST',
+                        data: formData,
+                        processData: false,
+                        contentType: false,
+                        success: function(data) {
+                            // Hide the loading spinner
+                            $('#loadingSpinner').hide();
+
+                            // Get the success messages from the hidden input field
+                            var successMessages = $('#successMessages').val();
+
+                            // Display the success messages in the modal
+                            $('#successModal .modal-body').html(successMessages);
+                            $('#successModal').modal('show');
+                        },
+                        error: function(xhr, status, error) {
+                            // Hide the loading spinner
+                            $('#loadingSpinner').hide();
+
+                            // Display an error message
+                            alert('An error occurred: ' + error);
+                        }
+                    });
+                });
+            });
+        </script>
+
+        <script>
+            // Replace 'YOUR_API_KEY' with your actual YouTube API key
+            const apiKey = 'AIzaSyDF8a3whluzUO2DMTteBhoZ__UPr19Y4P8';
+
+            // Function to generate tags from a related title
+            function generateTagsFromRelatedTitle() {
+                const tagTextarea = document.getElementById("tag");
+                const titleEnInput = document.getElementById("title_en");
+
+                // Get the related title from the input field
+                const titleEn = titleEnInput.value;
+
+                // Clear previous tags
+                tagTextarea.value = "";
+
+                // Make a request to the YouTube API to search for videos with the related title
+                fetch(`https://www.googleapis.com/youtube/v3/search?key=${apiKey}&q=${encodeURIComponent(titleEn)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.items && data.items.length > 0) {
+                            // Retrieve the video ID of the first search result
+                            const videoId = data.items[0].id.videoId;
+
+                            // Make another request to get video tags using the video ID
+                            fetch(`https://www.googleapis.com/youtube/v3/videos?key=${apiKey}&part=snippet&id=${videoId}`)
+                                .then(response => response.json())
+                                .then(data => {
+                                    if (data.items && data.items.length > 0) {
+                                        const tags = data.items[0].snippet.tags;
+
+                                        // Filter out tags that contain phrases like "sinhala new songs 2021"
+                                        const filteredTags = tags.filter(tag =>
+                                            !tag.toLowerCase().includes("sinhala new songs 2021")
+                                        );
+                                        // Fill the textarea with generated tags (excluding filtered tags)
+                                        tagTextarea.value = filteredTags.join(', ');
+                                    } else {
+                                        tagTextarea.value = "No tags found for this related title.";
+                                    }
+                                })
+                                .catch(error => {
+                                    console.error("Error fetching data from YouTube API:", error);
+                                });
+                        } else {
+                            tagTextarea.value = "No video found with this related title.";
+                        }
+                    })
+                    .catch(error => {
+                        console.error("Error fetching data from YouTube API:", error);
+                    });
+            }
+
+            // Attach the function to the input field's input event
+            document.getElementById("title_en").addEventListener("input", generateTagsFromRelatedTitle);
+        </script>
+
+     
+    </body>
+    <div class="footer">
+            All Rights Reserved 2024 Sritune.com
+        </div>
+    </html>
+
+    <?php
+} else {
+    header("Location: index.php");
+    exit();
+}
+?>
